@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Hide Frappe
 // @namespace    https://pekora.zip/
-// @version      1.0
-// @description  Hides specific games from the pekora.zip/Korone games listing page (Hides Frappe by Default)
-// @author       Dexed
+// @version      2.0
+// @description  Removes specific games from pekora.zip/Korone game (Hides Frappe By Default)
+// @author       you
 // @match        *://*.pekora.zip/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -17,67 +17,108 @@
   const STORAGE_KEY = 'hiddenGameIds';
   const DEFAULT_HIDDEN_IDS = ['840249'];
 
+
+  const ID_KEYS = [
+    'id', 'Id', 'ID',
+    'gameId', 'GameId',
+    'universeId', 'UniverseId',
+    'placeId', 'PlaceId',
+    'rootPlaceId', 'RootPlaceId'
+  ];
+
   function getHiddenIds() {
-    return GM_getValue(STORAGE_KEY, DEFAULT_HIDDEN_IDS);
+    return GM_getValue(STORAGE_KEY, DEFAULT_HIDDEN_IDS).map(String);
   }
 
   function setHiddenIds(ids) {
     GM_setValue(STORAGE_KEY, ids);
   }
 
-  function hideCardForLink(link, hiddenIds) {
-    const match = link.getAttribute('href') && link.getAttribute('href').match(/^\/games\/(\d+)\//);
-    if (!match) return;
-    const gameId = match[1];
-    if (!hiddenIds.includes(gameId)) return;
+  function isHiddenId(value) {
+    if (value === undefined || value === null) return false;
+    return getHiddenIds().includes(String(value));
+  }
 
-    let el = link;
-    let card = null;
-    for (let i = 0; i < 5 && el; i++) {
-      if (el.tagName === 'LI' || (el.className && String(el.className).includes('gameCard'))) {
-        card = el;
-        break;
+
+  function stripHiddenGames(data) {
+    if (Array.isArray(data)) {
+      return data
+        .filter((item) => {
+          if (item && typeof item === 'object') {
+            return !ID_KEYS.some((key) => key in item && isHiddenId(item[key]));
+          }
+          return true;
+        })
+        .map(stripHiddenGames);
+    }
+    if (data && typeof data === 'object') {
+      const out = {};
+      for (const key of Object.keys(data)) {
+        out[key] = stripHiddenGames(data[key]);
       }
-      el = el.parentElement;
+      return out;
     }
-    if (!card) card = link.parentElement || link;
-
-
-    if (card.isConnected) {
-      card.remove();
-    }
+    return data;
   }
 
-  function scanAndHide() {
-    const hiddenIds = getHiddenIds();
-    if (!hiddenIds.length) return;
-    const links = document.querySelectorAll('a[href^="/games/"]');
-    links.forEach((link) => hideCardForLink(link, hiddenIds));
-  }
+  const originalFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const response = await originalFetch.apply(this, args);
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return response;
+
+    try {
+      const json = await response.clone().json();
+      const filtered = stripHiddenGames(json);
+      return new Response(JSON.stringify(filtered), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+    } catch (e) {
+      return response; 
+    }
+  };
 
 
-  scanAndHide();
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this._interceptedUrl = url;
+    return originalOpen.call(this, method, url, ...rest);
+  };
 
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (...args) {
+    this.addEventListener('readystatechange', function () {
+      if (this.readyState !== 4) return;
+      try {
+        const contentType = this.getResponseHeader('content-type') || '';
+        if (!contentType.includes('application/json')) return;
 
-  const observer = new MutationObserver(() => {
-    scanAndHide();
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+        const json = JSON.parse(this.responseText);
+        const filteredText = JSON.stringify(stripHiddenGames(json));
 
+        Object.defineProperty(this, 'responseText', { get: () => filteredText, configurable: true });
+        Object.defineProperty(this, 'response', { get: () => filteredText, configurable: true });
+      } catch (e) {
+
+      }
+    });
+    return originalSend.apply(this, args);
+  };
 
   function addGameId() {
     const id = prompt('Enter the game ID to hide (the number in /games/{id}/...):');
     if (!id) return;
     const trimmed = id.trim();
     if (!/^\d+$/.test(trimmed)) {
-      alert('That doesn\'t look like a valid game ID (numbers only).');
+      alert("That doesn't look like a valid game ID (numbers only).");
       return;
     }
     const ids = getHiddenIds();
     if (!ids.includes(trimmed)) {
       setHiddenIds([...ids, trimmed]);
-      alert(`Game ${trimmed} will now be hidden. Refresh the page if it's still visible.`);
-      scanAndHide();
+      alert(`Game ${trimmed} will be filtered out. Refresh the page to see it gone.`);
     } else {
       alert('That game is already hidden.');
     }
@@ -93,7 +134,7 @@
     if (!id) return;
     const trimmed = id.trim();
     if (!ids.includes(trimmed)) {
-      alert('That ID isn\'t in the hidden list.');
+      alert("That ID isn't in the hidden list.");
       return;
     }
     setHiddenIds(ids.filter((x) => x !== trimmed));
